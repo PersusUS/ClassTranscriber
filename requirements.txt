@@ -1,0 +1,13 @@
+sounddevice==0.5.1
+soundfile==0.12.1
+numpy==1.26.4
+noisereduce==3.0.3
+faster-whisper==1.1.0
+pyannote.audio==3.3.2
+# Install PyTorch with CUDA 12.1 separately:
+# pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1
+torchaudio==2.3.1
+ollama==0.4.4
+python-dotenv==1.0.1
+pytest==8.3.3
