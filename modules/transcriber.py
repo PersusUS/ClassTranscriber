@@ -24,17 +24,41 @@ def _get_model() -> WhisperModel:
     """
     global _model
     if _model is None:
-        logger.info(
-            "Loading Whisper model '%s' on %s (%s)",
-            WHISPER_MODEL,
-            WHISPER_DEVICE,
-            WHISPER_COMPUTE_TYPE,
-        )
-        _model = WhisperModel(
-            WHISPER_MODEL,
-            device=WHISPER_DEVICE,
-            compute_type=WHISPER_COMPUTE_TYPE,
-        )
+        # Try configured settings first, then fall back on OOM
+        fallbacks = [
+            (WHISPER_DEVICE, WHISPER_COMPUTE_TYPE),
+            (WHISPER_DEVICE, "int8") if WHISPER_DEVICE == "cuda" else None,
+            ("cpu", "int8"),
+        ]
+        for fb in fallbacks:
+            if fb is None:
+                continue
+            device, compute = fb
+            logger.info(
+                "Loading Whisper model '%s' on %s (%s)",
+                WHISPER_MODEL,
+                device,
+                compute,
+            )
+            try:
+                _model = WhisperModel(
+                    WHISPER_MODEL,
+                    device=device,
+                    compute_type=compute,
+                )
+                break
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower():
+                    logger.warning(
+                        "Failed to load on %s (%s): %s — trying next fallback",
+                        device,
+                        compute,
+                        exc,
+                    )
+                    continue
+                raise
+        if _model is None:
+            raise RuntimeError("Could not load Whisper model with any configuration")
     return _model
 
 

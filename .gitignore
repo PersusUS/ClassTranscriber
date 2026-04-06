@@ -1,26 +1,32 @@
 # Environment variables (never commit .env)
 .env
 
-# Project instructions (internal use only)
-GUIDELINES.md
-INSTRUCTIONS.md
-
-# Audio and output directories (large files, generated)
+# Audio files (large, generated)
 audio/
+
+# Output (generated transcripts)
 output/
+
+# WAV and audio files anywhere
+*.wav
+*.mp3
+*.flac
 
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
-build/
-
-# pytest
+*$py.class
 .pytest_cache/
 
-# IDE
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE and OS
 .vscode/
 .idea/
-*.swp
-*.swo
+.DS_Store
+Thumbs.db
+*.log

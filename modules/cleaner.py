@@ -11,8 +11,6 @@ from ollama import chat
 
 logger = logging.getLogger(__name__)
 
-_professor_speaker: str | None = None
-
 _SYSTEM_PROMPT = (
     "You are a transcript cleaner for academic lectures. The speaker has a strong Chinese accent and speaks non-native English.\n"
     "Your task: fix grammar, add correct punctuation, remove filler words (uh, um, er, like, you know), \n"
@@ -21,18 +19,13 @@ _SYSTEM_PROMPT = (
     "Respond ONLY with the corrected text, one line per input line. Do not add explanations or numbering."
 )
 
+_professor_speaker = None
 
-def set_professor_speaker(speaker_label: str) -> None:
-    """Sets the module-level variable that identifies which speaker is the professor.
 
-    Must be called before clean_transcript().
-
-    Args:
-        speaker_label: The speaker label string (e.g. "SPEAKER_00").
-    """
+def set_professor_speaker(speaker: str):
+    """Sets the professor speaker ID. Only this speaker's text will be cleaned."""
     global _professor_speaker
-    _professor_speaker = speaker_label
-    logger.info("Professor speaker set to: %s", speaker_label)
+    _professor_speaker = speaker
 
 
 def clean_transcript(
@@ -40,42 +33,42 @@ def clean_transcript(
     model: str = "gemma3:4b",
     chunk_size: int = 50,
 ) -> list[dict]:
-    """Takes merged segments and cleans the professor's text using Ollama.
+    """Cleans the text of all segments using Ollama.
 
-    Non-professor segments are passed through unchanged.
     Processes segments in chunks of chunk_size to stay within context limits.
 
     Args:
         segments: List of dicts with keys "start", "end", "speaker", "text".
         model: Ollama model name. Default "gemma3:4b".
-        chunk_size: Number of professor segments per LLM call.
+        chunk_size: Number of segments per LLM call.
 
     Returns:
-        The same list structure with cleaned "text" fields for professor segments.
+        The same list structure with cleaned "text" fields.
 
     Raises:
-        RuntimeError: If _professor_speaker has not been set.
         RuntimeError: If Ollama is not running.
     """
-    if _professor_speaker is None:
-        raise RuntimeError(
-            "Professor speaker not set. Call set_professor_speaker() first."
-        )
-
-    # Collect indices of professor segments
-    prof_indices = [
-        i for i, seg in enumerate(segments)
-        if seg["speaker"] == _professor_speaker
-    ]
-
-    if not prof_indices:
-        logger.info("No professor segments found. Returning segments unchanged.")
+    if not segments:
+        logger.info("No segments to clean. Returning empty list.")
         return segments
 
-    num_chunks = math.ceil(len(prof_indices) / chunk_size)
+    if getattr(clean_transcript, '__globals__', {}).get('_professor_speaker', None) or globals().get('_professor_speaker', None):
+        all_indices = [
+            i
+            for i, s in enumerate(segments)
+            if s.get("speaker") == _professor_speaker
+        ]
+    else:
+        all_indices = list(range(len(segments)))
+
+    if not all_indices:
+        logger.info("No professor segments found. Returning unaltered.")
+        return segments
+
+    num_chunks = math.ceil(len(all_indices) / chunk_size)
     logger.info(
-        "Cleaning %d professor segments in %d chunk(s) (model=%s)",
-        len(prof_indices),
+        "Cleaning %d segments in %d chunk(s) (model=%s)",
+        len(all_indices),
         num_chunks,
         model,
     )
@@ -83,7 +76,7 @@ def clean_transcript(
     for chunk_idx in range(num_chunks):
         start = chunk_idx * chunk_size
         end = start + chunk_size
-        chunk_indices = prof_indices[start:end]
+        chunk_indices = all_indices[start:end]
 
         original_texts = [segments[i]["text"] for i in chunk_indices]
         user_message = "\n".join(original_texts)

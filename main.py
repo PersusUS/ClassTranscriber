@@ -9,8 +9,12 @@ import argparse
 import json
 import logging
 import os
+import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 
+import torch
 from dotenv import load_dotenv
 
 import config
@@ -19,7 +23,7 @@ from modules.preprocessor import preprocess
 from modules.diarizer import diarize
 from modules.transcriber import transcribe
 from modules.merger import merge
-from modules.cleaner import set_professor_speaker, clean_transcript
+from modules.cleaner import clean_transcript
 from modules.exporter import export
 
 load_dotenv()
@@ -27,6 +31,76 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 logging.basicConfig(level=config.LOG_LEVEL, format=config.LOG_FORMAT)
 logger = logging.getLogger(__name__)
+
+
+def validate_environment() -> None:
+    """Checks all required environment prerequisites before running any command.
+
+    Validates:
+        - .env file exists with instructions to create it if missing
+        - HF_TOKEN is set and starts with 'hf_'
+        - CUDA is available via torch
+        - Ollama is reachable at http://localhost:11434
+        - audio/ and output/ directories exist (creates them if not)
+
+    Raises:
+        SystemExit: If any critical check fails.
+    """
+    errors = []
+
+    # 1. .env file
+    env_path = config.BASE_DIR / ".env"
+    if not env_path.exists():
+        errors.append(
+            ".env file not found. Create it by running:\n"
+            "  copy .env.example .env\n"
+            "Then edit .env and set your HuggingFace token:\n"
+            "  HF_TOKEN=hf_your_token_here\n"
+            "Get a token at: https://huggingface.co/settings/tokens"
+        )
+
+    # 2. HF_TOKEN
+    if not HF_TOKEN:
+        errors.append(
+            "HF_TOKEN is not set. Add it to your .env file:\n"
+            "  HF_TOKEN=hf_your_token_here"
+        )
+    elif not HF_TOKEN.startswith("hf_"):
+        errors.append(
+            f"HF_TOKEN appears invalid (expected 'hf_...' but got '{HF_TOKEN[:6]}...'). "
+            "Get a valid token at: https://huggingface.co/settings/tokens"
+        )
+
+    # 3. CUDA
+    if not torch.cuda.is_available():
+        errors.append(
+            "CUDA is not available. ClassTranscriber requires an NVIDIA GPU with CUDA 12.\n"
+            "Ensure you have the correct NVIDIA drivers and PyTorch with CUDA installed:\n"
+            "  pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121"
+        )
+
+    # 4. Ollama
+    try:
+        req = urllib.request.Request("http://localhost:11434", method="GET")
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except (urllib.error.URLError, OSError):
+        errors.append(
+            "Ollama is not reachable at http://localhost:11434.\n"
+            "Run: ollama serve"
+        )
+
+    # 5. Directories
+    config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if errors:
+        logger.error("Environment validation failed:")
+        for i, err in enumerate(errors, 1):
+            logger.error("  [%d] %s", i, err)
+        sys.exit(1)
+
+    logger.info("Environment validation passed")
 
 
 def cmd_record(args: argparse.Namespace) -> None:
@@ -71,7 +145,6 @@ def cmd_clean(args: argparse.Namespace) -> None:
     input_path = Path(args.input)
     with open(input_path, "r", encoding="utf-8") as f:
         segments = json.load(f)
-    set_professor_speaker(args.professor)
     cleaned = clean_transcript(segments)
     # Save cleaned segments back
     output_path = input_path.with_suffix(".cleaned.json")
@@ -116,15 +189,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     logger.info("=== Step 5/7: Merging ===")
     merged_segments = merge(diarization_segments, transcription_segments)
 
-    # 6. Clean — ask user which speaker is the professor
+    # 5b. Save raw (uncleaned) transcript
+    raw_transcript_path = config.OUTPUT_DIR / f"{name}_raw.txt"
+    export(merged_segments, raw_transcript_path)
+    logger.info("Raw transcript saved: %s", raw_transcript_path)
+
+    # 6. Clean
     logger.info("=== Step 6/7: Cleaning with LLM ===")
-    speakers = sorted({seg["speaker"] for seg in merged_segments})
-    logger.info("Detected speakers: %s", ", ".join(speakers))
-    professor = input(f"Which speaker is the professor? {speakers}: ").strip()
-    if professor not in speakers:
-        logger.warning("'%s' not in detected speakers. Using first speaker: %s", professor, speakers[0])
-        professor = speakers[0]
-    set_professor_speaker(professor)
     cleaned_segments = clean_transcript(merged_segments)
 
     # 7. Export
@@ -163,7 +234,6 @@ def main() -> None:
     # clean
     p_clean = subparsers.add_parser("clean", help="LLM transcript cleanup")
     p_clean.add_argument("--input", type=str, required=True, help="Input JSON file with merged segments")
-    p_clean.add_argument("--professor", type=str, required=True, help="Speaker label of the professor")
 
     # run (full pipeline)
     p_run = subparsers.add_parser("run", help="Full end-to-end pipeline")
@@ -171,6 +241,8 @@ def main() -> None:
     p_run.add_argument("--name", type=str, required=True, help="Session name (used for filenames)")
 
     args = parser.parse_args()
+
+    validate_environment()
 
     commands = {
         "record": cmd_record,
