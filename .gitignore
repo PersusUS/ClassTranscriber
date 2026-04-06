@@ -30,3 +30,7 @@ ENV/
 .DS_Store
 Thumbs.db
 *.log
+
+# AI Instructions
+GUIDELINES.md
+INSTRUCTIONS.md
