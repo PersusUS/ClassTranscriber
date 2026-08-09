@@ -256,7 +256,8 @@ pytest
 
 297 tests unitarios, 99 % de cobertura del código fuente. No necesitan GPU,
 ni micrófono, ni modelos descargados: Whisper, pyannote, Ollama, PortAudio y
-CUDA están simulados, así que la batería entera tarda unos 3 segundos.
+CUDA están simulados, así que la batería entera tarda un par de segundos
+(algo más la primera vez, mientras se importan numpy y scipy).
 
 Para ver la cobertura:
 
