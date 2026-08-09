@@ -1,5 +1,8 @@
 """Unit tests for config.py — profile and device resolution."""
 
+import sys
+from unittest.mock import MagicMock
+
 import pytest
 
 import config
@@ -102,3 +105,87 @@ def test_settings_describe_mentions_key_choices():
 
     assert "profile=low" in described
     assert "device=cpu" in described
+
+
+def test_cuda_available_without_torch(monkeypatch):
+    """A machine with no torch installed answers False instead of raising."""
+    monkeypatch.setitem(sys.modules, "torch", None)
+
+    assert config.cuda_available() is False
+    assert config.gpu_vram_gb() == 0.0
+
+
+def test_cuda_available_with_broken_driver(monkeypatch):
+    """A torch that raises on the CUDA query is treated as no CUDA."""
+    torch = MagicMock()
+    torch.cuda.is_available.side_effect = RuntimeError("driver mismatch")
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    assert config.cuda_available() is False
+
+
+def test_gpu_vram_reported_in_gb(monkeypatch):
+    """VRAM is reported in GB, from torch's byte count."""
+    torch = MagicMock()
+    torch.cuda.is_available.return_value = True
+    torch.cuda.get_device_properties.return_value.total_memory = 6 * 1024 ** 3
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    assert config.gpu_vram_gb() == pytest.approx(6.0)
+
+
+def test_gpu_vram_zero_without_cuda(monkeypatch):
+    """No CUDA device means no VRAM to report."""
+    torch = MagicMock()
+    torch.cuda.is_available.return_value = False
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    assert config.gpu_vram_gb() == 0.0
+
+
+def test_resolve_settings_overrides_models(monkeypatch):
+    """Explicit model choices beat the profile's defaults."""
+    monkeypatch.setattr(config, "cuda_available", lambda: False)
+
+    settings = config.resolve_settings(
+        profile="low", whisper_model="medium", ollama_model="llama3.2:3b"
+    )
+
+    assert settings.whisper_model == "medium"
+    assert settings.ollama_model == "llama3.2:3b"
+
+
+def test_resolve_settings_denoise_override():
+    """Denoising can be forced off through the settings."""
+    assert config.resolve_settings(device="cpu", denoise=False).denoise is False
+
+
+def test_resolve_settings_unknown_device_passes_through(monkeypatch):
+    """An exotic device name is respected but uses CPU quantisation."""
+    monkeypatch.setattr(config, "cuda_available", lambda: False)
+
+    settings = config.resolve_settings(profile="low", device="mps")
+
+    assert settings.device == "mps"
+    assert settings.compute_type == "int8"
+
+
+def test_initial_prompt_is_none_for_unknown_language():
+    """An unsupported language simply gets no biasing prompt."""
+    assert config.resolve_settings(language="de", device="cpu").initial_prompt is None
+
+
+def test_hallucination_patterns_are_lowercase():
+    """The matcher lowercases its input, so the patterns must be lowercase."""
+    assert all(pattern == pattern.lower() for pattern in config.HALLUCINATION_PATTERNS)
+
+
+def test_every_profile_is_self_consistent():
+    """Each profile names a model, a quantisation and an LLM."""
+    for name, profile in config.PROFILES.items():
+        assert profile.name == name
+        assert profile.whisper_model
+        assert profile.cpu_compute_type
+        assert profile.gpu_compute_type
+        assert profile.ollama_model
+        assert profile.beam_size >= 1

@@ -12,6 +12,7 @@ Three audiences, three files:
   media player.
 """
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,105 @@ logger = logging.getLogger(__name__)
 
 PARAGRAPH_GAP_SECONDS = 3.0
 TIME_MARKER_INTERVAL = 300.0
+
+VALID_FORMATS = ("txt", "professor", "md", "srt", "json")
+
+
+def parse_formats(spec: str) -> tuple[str, ...]:
+    """Parses a comma-separated format list, rejecting unknown names.
+
+    A silent typo here is expensive: the pipeline would run for an hour
+    and then write nothing at all.
+
+    Args:
+        spec: Comma-separated format names, e.g. "txt,professor".
+
+    Returns:
+        The requested formats, lowercased and de-duplicated in order.
+
+    Raises:
+        ValueError: If a name is not one of `VALID_FORMATS`, or none given.
+    """
+    names: list[str] = []
+    for part in spec.split(","):
+        name = part.strip().lower()
+        if name and name not in names:
+            names.append(name)
+
+    unknown = [name for name in names if name not in VALID_FORMATS]
+    if unknown:
+        raise ValueError(
+            f"Unknown output format(s): {', '.join(unknown)}. "
+            f"Choose from: {', '.join(VALID_FORMATS)}"
+        )
+    if not names:
+        raise ValueError(f"No output format given. Choose from: {', '.join(VALID_FORMATS)}")
+
+    return tuple(names)
+
+
+def write_outputs(
+    segments: list[dict],
+    name: str,
+    output_dir: Path,
+    formats: tuple[str, ...] = ("txt", "professor"),
+    professor: str | None = None,
+) -> dict[str, Path]:
+    """Writes every requested format for one session.
+
+    Shared by the full pipeline and the standalone `export` command so the
+    two cannot drift apart.
+
+    Args:
+        segments: Speaker-labelled segments.
+        name: Base name for the output files.
+        output_dir: Directory to write into; created if missing.
+        formats: Any of `VALID_FORMATS`.
+        professor: The professor's label, when one was identified.
+
+    Returns:
+        A mapping of artifact name to the path written.
+    """
+    requested = set(formats)
+    unknown = requested - set(VALID_FORMATS)
+    if unknown:
+        raise ValueError(f"Unknown output format(s): {', '.join(sorted(unknown))}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: dict[str, Path] = {}
+    names = {professor: "PROFESOR"} if professor else None
+
+    if "txt" in requested:
+        outputs["full"] = export(
+            segments, output_dir / f"{name}_completo.txt", speaker_names=names
+        )
+
+    if "professor" in requested:
+        if professor:
+            outputs["professor"] = export_professor(
+                segments, professor, output_dir / f"{name}_profesor.txt"
+            )
+        else:
+            logger.warning(
+                "Professor-only output was requested but no professor was identified — skipping"
+            )
+
+    if "md" in requested:
+        outputs["markdown"] = export_markdown(
+            segments, output_dir / f"{name}.md", title=name, professor=professor
+        )
+
+    if "srt" in requested:
+        outputs["subtitles"] = export_srt(segments, output_dir / f"{name}.srt")
+
+    if "json" in requested:
+        path = output_dir / f"{name}.json"
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(segments, handle, indent=2, ensure_ascii=False)
+        logger.info("Segments exported to %s", path)
+        outputs["json"] = path
+
+    return outputs
 
 
 def export(
@@ -123,7 +223,9 @@ def export_professor(
         paragraphs[-1][1].append(segment["text"].strip())
         previous_end = segment["end"]
 
-    total_seconds = speech[-1]["end"] - speech[0]["start"]
+    # Sum the turns rather than measuring first-to-last: the span between
+    # them also contains every student question, which is not speech time.
+    total_seconds = sum(segment["end"] - segment["start"] for segment in speech)
     word_count = sum(len(segment["text"].split()) for segment in speech)
 
     with open(output_path, "w", encoding="utf-8") as handle:

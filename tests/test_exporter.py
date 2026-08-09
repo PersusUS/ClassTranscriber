@@ -1,11 +1,20 @@
 """Unit tests for M7 — modules/exporter.py."""
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 
-from modules.exporter import export, export_markdown, export_professor, export_srt
+from modules.exporter import (
+    VALID_FORMATS,
+    export,
+    export_markdown,
+    export_professor,
+    export_srt,
+    parse_formats,
+    write_outputs,
+)
 
 
 def _make_segments():
@@ -129,3 +138,122 @@ def test_export_srt_format(tmp_path: Path):
 
     assert content.startswith("1\n")
     assert re.search(r"\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}", content)
+
+
+def test_parse_formats_normalises():
+    """Case and spacing are tolerated; duplicates collapse."""
+    assert parse_formats(" TXT , professor,txt ") == ("txt", "professor")
+
+
+def test_parse_formats_rejects_typos():
+    """The Spanish spelling of 'professor' is the obvious typo to catch."""
+    with pytest.raises(ValueError, match="profesor"):
+        parse_formats("txt,profesor")
+
+
+def test_parse_formats_rejects_empty():
+    """An empty format list is a mistake, not "write nothing"."""
+    with pytest.raises(ValueError, match="No output format"):
+        parse_formats("  ,  ")
+
+
+def test_parse_formats_accepts_every_valid_name():
+    """Every advertised format is actually accepted."""
+    assert parse_formats(",".join(VALID_FORMATS)) == VALID_FORMATS
+
+
+def test_write_outputs_writes_each_format(tmp_path: Path):
+    """One call produces every requested artifact."""
+    outputs = write_outputs(
+        _make_segments(),
+        name="clase",
+        output_dir=tmp_path / "out",
+        formats=("txt", "professor", "md", "srt", "json"),
+        professor="SPEAKER_00",
+    )
+
+    assert set(outputs) == {"full", "professor", "markdown", "subtitles", "json"}
+    assert all(path.exists() for path in outputs.values())
+
+
+def test_write_outputs_creates_the_directory(tmp_path: Path):
+    """The output directory does not have to exist beforehand."""
+    write_outputs(_make_segments(), "clase", tmp_path / "nueva", formats=("txt",))
+
+    assert (tmp_path / "nueva" / "clase_completo.txt").exists()
+
+
+def test_write_outputs_skips_professor_file_without_a_professor(tmp_path: Path, caplog):
+    """Asking for professor-only output with no professor warns and skips."""
+    with caplog.at_level("WARNING"):
+        outputs = write_outputs(
+            _make_segments(), "clase", tmp_path, formats=("professor",), professor=None
+        )
+
+    assert "professor" not in outputs
+    assert "no professor was identified" in caplog.text
+
+
+def test_write_outputs_rejects_unknown_format(tmp_path: Path):
+    """An unknown format is rejected here too, not only at the CLI."""
+    with pytest.raises(ValueError, match="Unknown output format"):
+        write_outputs(_make_segments(), "clase", tmp_path, formats=("pdf",))
+
+
+def test_write_outputs_json_is_readable(tmp_path: Path):
+    """The JSON export round-trips, accents included."""
+    outputs = write_outputs(_make_segments(), "clase", tmp_path, formats=("json",))
+    data = json.loads(outputs["json"].read_text(encoding="utf-8"))
+
+    assert data[1]["text"].startswith("Profesor, ¿puede")
+
+
+def test_export_professor_counts_only_the_professor_speech(tmp_path: Path):
+    """The header's speech time excludes the gaps where students talked.
+
+    Measuring first-to-last would count the student's question as the
+    professor's speaking time.
+    """
+    segments = [
+        {"start": 0.0, "end": 10.0, "speaker": "P", "text": "Primera."},
+        {"start": 100.0, "end": 110.0, "speaker": "P", "text": "Segunda."},
+    ]
+    output = tmp_path / "profesor.txt"
+    export_professor(segments, "P", output)
+
+    assert "00:00:20 of speech" in output.read_text(encoding="utf-8")
+
+
+def test_export_markdown_rejects_empty(tmp_path: Path):
+    """An empty transcript is an error, not an empty document."""
+    with pytest.raises(ValueError):
+        export_markdown([], tmp_path / "a.md", title="x")
+
+
+def test_export_srt_rejects_empty(tmp_path: Path):
+    """Same for subtitles."""
+    with pytest.raises(ValueError):
+        export_srt([], tmp_path / "a.srt")
+
+
+def test_export_without_timestamps(tmp_path: Path):
+    """Timestamps can be omitted for a cleaner reading copy."""
+    output = tmp_path / "plain.txt"
+    export(_make_segments(), output, include_timestamps=False)
+    content = output.read_text(encoding="utf-8")
+
+    assert "SPEAKER_00:" in content
+    assert not re.search(r"\[\d{2}:\d{2}:\d{2}\] SPEAKER", content)
+
+
+def test_export_professor_without_time_markers(tmp_path: Path):
+    """Time markers can be turned off entirely."""
+    segments = [
+        {"start": 0.0, "end": 2.0, "speaker": "P", "text": "Inicio."},
+        {"start": 900.0, "end": 902.0, "speaker": "P", "text": "Después."},
+    ]
+    output = tmp_path / "profesor.txt"
+    export_professor(segments, "P", output, include_time_markers=False)
+
+    body = output.read_text(encoding="utf-8").split("\n\n", 1)[1]
+    assert "[00:15:00]" not in body

@@ -14,6 +14,7 @@ from modules.audio_utils import (
     format_timestamp,
     highpass,
     iter_blocks,
+    peak_dbfs,
     rms,
     scan_levels,
     soft_limit,
@@ -206,3 +207,48 @@ def test_format_timestamp():
     assert format_timestamp(3725.0) == "01:02:05"
     assert format_timestamp(3725.5, with_millis=True) == "01:02:05,500"
     assert format_timestamp(-5.0) == "00:00:00"
+
+
+def test_rms_and_peak_of_empty_array():
+    """Empty input yields defined values rather than a numpy warning."""
+    empty = np.zeros(0, dtype=np.float32)
+
+    assert rms(empty) == 0.0
+    assert peak_dbfs(empty) == float("-inf")
+
+
+def test_soft_limit_of_empty_array():
+    """The limiter passes an empty block straight through."""
+    assert soft_limit(np.zeros(0, dtype=np.float32)).size == 0
+
+
+def test_crossfade_with_nothing_to_blend():
+    """With no overlap the new block is returned unchanged."""
+    following = np.arange(5, dtype=np.float32)
+
+    assert np.array_equal(crossfade(np.zeros(0, dtype=np.float32), following), following)
+
+
+def test_scan_levels_of_empty_file(tmp_path: Path):
+    """An empty recording produces empty measurements, not an exception."""
+    path = tmp_path / "empty.wav"
+    sf.write(str(path), np.zeros(0, dtype=np.float32), 16000, subtype="FLOAT")
+
+    block_rms, noise_profile, rate = scan_levels(path)
+
+    assert block_rms.size == 0
+    assert noise_profile.size == 0
+    assert rate == 16000
+
+
+def test_compute_gain_of_silence():
+    """Pure silence is left alone instead of being amplified 25 dB."""
+    assert compute_gain(np.zeros(10)) == 1.0
+    assert compute_gain(np.zeros(0)) == 1.0
+
+
+def test_to_mono_passes_through_mono():
+    """Mono input is returned untouched."""
+    mono = np.arange(4, dtype=np.float32)
+
+    assert np.array_equal(to_mono(mono), mono)

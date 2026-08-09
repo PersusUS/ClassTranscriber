@@ -197,3 +197,138 @@ def test_filter_segments_keeps_first_repetition():
     kept = _filter_segments(segments)
 
     assert len(kept) == 2      # The first plus one repeat before the loop is detected
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_logs_progress_with_eta(mock_load, tmp_path, caplog):
+    """Long CPU runs report progress; a silent terminal looks like a hang."""
+    segments = [FakeSegment(float(i * 30), float(i * 30 + 30), f"frase {i}") for i in range(5)]
+    mock_load.return_value = _mock_model(segments)
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    with caplog.at_level("INFO"):
+        transcribe(audio)
+
+    assert "realtime" in caplog.text
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_language_argument_overrides_settings(mock_load, tmp_path):
+    """An explicit language beats the configured default."""
+    model = _mock_model()
+    mock_load.return_value = model
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    transcribe(audio, language="EN")
+
+    assert model.transcribe.call_args.kwargs["language"] == "en"
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_custom_initial_prompt(mock_load, tmp_path):
+    """A subject-specific prompt can be supplied to bias vocabulary."""
+    model = _mock_model()
+    mock_load.return_value = model
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    transcribe(audio, initial_prompt="Álgebra lineal, autovalores, matrices.")
+
+    assert "autovalores" in model.transcribe.call_args.kwargs["initial_prompt"]
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_can_disable_word_timestamps(mock_load, tmp_path):
+    """Word timings can be turned off to save a little CPU."""
+    model = _mock_model()
+    mock_load.return_value = model
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    result = transcribe(audio, word_timestamps=False)
+
+    assert model.transcribe.call_args.kwargs["word_timestamps"] is False
+    assert "words" not in result[0]
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_applies_vad_parameters(mock_load, tmp_path):
+    """VAD is tuned for noisy rooms, not left at library defaults."""
+    model = _mock_model()
+    mock_load.return_value = model
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    transcribe(audio)
+
+    vad = model.transcribe.call_args.kwargs["vad_parameters"]
+    assert vad["min_silence_duration_ms"] == config.VAD_MIN_SILENCE_MS
+    assert vad["speech_pad_ms"] == config.VAD_SPEECH_PAD_MS
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_drops_words_without_timings(mock_load, tmp_path):
+    """Words faster-whisper could not time are skipped, not crashed on."""
+    words = [FakeWord(0.0, 0.4, " Buenos"), FakeWord(None, None, " días")]
+    mock_load.return_value = _mock_model([FakeSegment(0.0, 1.0, "Buenos días", words=words)])
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    result = transcribe(audio)
+
+    assert [word["word"] for word in result[0]["words"]] == [" Buenos"]
+
+
+def test_model_load_failure_is_reported(tmp_path, monkeypatch):
+    """If no configuration loads, the error names the model."""
+    fake_module = MagicMock()
+    fake_module.WhisperModel = MagicMock(side_effect=RuntimeError("nope"))
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    with pytest.raises(RuntimeError, match="Could not load Whisper model"):
+        transcribe(audio, settings=config.resolve_settings(profile="low", device="cpu"))
+
+
+def test_filter_segments_keeps_confident_speech():
+    """Nothing is dropped when the audio is clean."""
+    segments = [
+        {"text": "Primera frase.", "avg_logprob": -0.2, "no_speech_prob": 0.02},
+        {"text": "Segunda frase.", "avg_logprob": -0.4, "no_speech_prob": 0.05},
+    ]
+
+    assert len(_filter_segments(segments)) == 2
+
+
+def test_filter_segments_tolerates_missing_confidence():
+    """Segments without confidence data are kept rather than discarded."""
+    segments = [{"text": "Frase.", "avg_logprob": None, "no_speech_prob": None}]
+
+    assert len(_filter_segments(segments)) == 1
+
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_progress_without_known_duration(mock_load, tmp_path, caplog):
+    """Progress is still reported when the audio duration is unknown."""
+    class NoDurationInfo:
+        language = "es"
+        language_probability = 0.9
+        duration = None
+
+    model = MagicMock()
+    model.transcribe.return_value = (
+        iter([FakeSegment(0.0, 90.0, "una frase larga")]),
+        NoDurationInfo(),
+    )
+    mock_load.return_value = model
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    with caplog.at_level("INFO"):
+        transcribe(audio)
+
+    assert "Transcribed 90 s" in caplog.text

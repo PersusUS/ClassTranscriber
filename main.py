@@ -260,23 +260,18 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Exports a merged or cleaned transcript to readable files."""
-    segments = _load_json(Path(args.input))
+    input_path = Path(args.input)
+    segments = _load_json(input_path)
+    formats = exporter.parse_formats(args.formats)
     professor = resolve_professor(segments, requested=args.professor, interactive=not args.yes)
-    name = args.name or Path(args.input).stem
-    formats = set(args.formats.split(","))
 
-    if "txt" in formats:
-        exporter.export(
-            segments,
-            config.OUTPUT_DIR / f"{name}_completo.txt",
-            speaker_names={professor: "PROFESOR"} if professor else None,
-        )
-    if "professor" in formats and professor:
-        exporter.export_professor(segments, professor, config.OUTPUT_DIR / f"{name}_profesor.txt")
-    if "md" in formats:
-        exporter.export_markdown(segments, config.OUTPUT_DIR / f"{name}.md", name, professor)
-    if "srt" in formats:
-        exporter.export_srt(segments, config.OUTPUT_DIR / f"{name}.srt")
+    exporter.write_outputs(
+        segments,
+        name=args.name or input_path.stem,
+        output_dir=config.OUTPUT_DIR,
+        formats=formats,
+        professor=professor,
+    )
 
 
 def cmd_clear(args: argparse.Namespace) -> None:
@@ -301,7 +296,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         resume=args.resume,
         interactive=not args.yes,
         hf_token=os.getenv("HF_TOKEN"),
-        formats=tuple(args.formats.split(",")),
+        formats=exporter.parse_formats(args.formats),
         keep_audio=not args.no_keep_audio,
     )
     pipeline.run_pipeline(options)
@@ -405,6 +400,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Command name -> handler. Kept beside REQUIREMENTS so the two stay in step.
+COMMANDS = {
+    "devices": cmd_devices,
+    "doctor": cmd_doctor,
+    "record": cmd_record,
+    "preprocess": cmd_preprocess,
+    "transcribe": cmd_transcribe,
+    "diarize": cmd_diarize,
+    "merge": cmd_merge,
+    "clean": cmd_clean,
+    "export": cmd_export,
+    "clear": cmd_clear,
+    "run": cmd_run,
+}
+
+
 def requirements_for(args: argparse.Namespace) -> set[str]:
     """Works out which prerequisites the invocation actually needs."""
     requires = set(REQUIREMENTS.get(args.command, set()))
@@ -427,25 +438,11 @@ def main() -> None:
 
     logging.basicConfig(level=args.log_level.upper(), format=config.LOG_FORMAT)
 
-    commands = {
-        "devices": cmd_devices,
-        "doctor": cmd_doctor,
-        "record": cmd_record,
-        "preprocess": cmd_preprocess,
-        "transcribe": cmd_transcribe,
-        "diarize": cmd_diarize,
-        "merge": cmd_merge,
-        "clean": cmd_clean,
-        "export": cmd_export,
-        "clear": cmd_clear,
-        "run": cmd_run,
-    }
-
     if args.command != "doctor":
         validate_environment(requirements_for(args))
 
     try:
-        commands[args.command](args)
+        COMMANDS[args.command](args)
     except KeyboardInterrupt:
         logger.warning("Interrupted. Re-run with --resume to continue from here.")
         sys.exit(130)

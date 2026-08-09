@@ -1,9 +1,11 @@
 """Unit tests for M6 — modules/cleaner.py."""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import config
 import modules.cleaner as cleaner_mod
 from modules.cleaner import _parse_reply, clean_transcript, set_professor_speaker
 
@@ -211,3 +213,115 @@ def test_parse_reply_accepts_several_separators():
 def test_parse_reply_ignores_out_of_range():
     """Line numbers the chunk never sent are discarded."""
     assert _parse_reply("1| uno\n9| nueve", expected=2) == {1: "uno"}
+
+
+def test_get_chat_binds_to_the_configured_host(monkeypatch):
+    """The Ollama client is built lazily and points at OLLAMA_HOST."""
+    client_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.Client = client_class
+    monkeypatch.setitem(sys.modules, "ollama", fake_module)
+    monkeypatch.setattr(cleaner_mod, "chat", None)
+
+    cleaner_mod._get_chat()
+
+    assert client_class.call_args.kwargs["host"] == config.OLLAMA_HOST
+
+
+def test_extract_content_from_object():
+    """The modern ollama response object is understood."""
+    response = MagicMock()
+    response.message.content = "hola"
+
+    assert cleaner_mod._extract_content(response) == "hola"
+
+
+def test_extract_content_from_dict():
+    """Older dict-shaped responses are understood too."""
+    assert cleaner_mod._extract_content({"message": {"content": "hola"}}) == "hola"
+
+
+def test_extract_content_from_garbage():
+    """An unrecognised shape yields empty text rather than raising."""
+    assert cleaner_mod._extract_content(object()) == ""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionError("refused"),
+        TimeoutError("timed out"),
+        OSError("network unreachable"),
+        RuntimeError("failed to connect to ollama"),
+    ],
+)
+def test_is_connection_error_detects_server_down(error):
+    """Every flavour of "the server is not there" is recognised."""
+    assert cleaner_mod._is_connection_error(error) is True
+
+
+def test_is_connection_error_ignores_model_errors():
+    """A model-side error is not a connection problem."""
+    assert cleaner_mod._is_connection_error(ValueError("model not found")) is False
+
+
+@patch("modules.cleaner.chat")
+def test_clean_sends_deterministic_options(mock_chat):
+    """Temperature 0: this is correction, not creative writing."""
+    mock_chat.return_value = _numbered("Hola.")
+    segments = [{"start": 0.0, "end": 1.0, "speaker": "A", "text": "hola"}]
+
+    clean_transcript(segments, professor="A")
+
+    options = mock_chat.call_args.kwargs["options"]
+    assert options["temperature"] == 0
+    assert options["num_ctx"] == config.OLLAMA_NUM_CTX
+
+
+@patch("modules.cleaner.chat")
+def test_clean_uses_the_spanish_prompt_by_default(mock_chat):
+    """A class in Spain gets the Spanish system prompt."""
+    mock_chat.return_value = _numbered("Hola.")
+    segments = [{"start": 0.0, "end": 1.0, "speaker": "A", "text": "hola"}]
+
+    clean_transcript(segments, professor="A")
+
+    system = mock_chat.call_args.kwargs["messages"][0]["content"]
+    assert "transcripciones de clases universitarias en español" in system
+    # The old prompt assumed a Chinese-accented English speaker.
+    assert "Chinese" not in system
+
+
+@patch("modules.cleaner.chat")
+def test_clean_numbers_the_lines_it_sends(mock_chat):
+    """The request itself is numbered — that is what makes realignment safe."""
+    mock_chat.return_value = _numbered("Uno.", "Dos.")
+    segments = [
+        {"start": 0.0, "end": 1.0, "speaker": "A", "text": "uno"},
+        {"start": 1.0, "end": 2.0, "speaker": "A", "text": "dos"},
+    ]
+
+    clean_transcript(segments, professor="A")
+
+    assert mock_chat.call_args.kwargs["messages"][1]["content"] == "1| uno\n2| dos"
+
+
+@patch("modules.cleaner.chat")
+def test_clean_unknown_speaker_leaves_everything_alone(mock_chat, caplog):
+    """Pointing the cleanup at a speaker that does not exist is a no-op."""
+    with caplog.at_level("WARNING"):
+        result = clean_transcript(_make_segments(), professor="SPEAKER_42")
+
+    mock_chat.assert_not_called()
+    assert result[0]["text"] == "eh hola a todos"
+    assert "No segments found" in caplog.text
+
+
+@patch("modules.cleaner.chat")
+def test_clean_all_speakers_when_no_professor(mock_chat):
+    """With no professor set, every segment is cleaned."""
+    mock_chat.return_value = _numbered("A.", "B.", "C.", "D.", "E.")
+
+    result = clean_transcript(_make_segments())
+
+    assert [segment["text"] for segment in result] == ["A.", "B.", "C.", "D.", "E."]

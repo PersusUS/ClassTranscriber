@@ -254,7 +254,34 @@ Algunas decisiones que explican por qué funciona en aulas ruidosas:
 pytest
 ```
 
-Los tests no necesitan GPU, ni micrófono, ni modelos descargados.
+297 tests unitarios, 99 % de cobertura del código fuente. No necesitan GPU,
+ni micrófono, ni modelos descargados: Whisper, pyannote, Ollama, PortAudio y
+CUDA están simulados, así que la batería entera tarda unos 3 segundos.
+
+Para ver la cobertura:
+
+```bash
+pip install pytest-cov
+pytest --cov=config --cov=main --cov=modules --cov-report=term-missing
+```
+
+Lo que cubren, además de los casos normales de cada módulo:
+
+- **Audio por bloques** — que procesar en un bloque o en cinco dé el mismo
+  resultado (sin artefactos en las costuras) y que no se pierda ni un sample,
+  que es de lo que dependen los timestamps.
+- **Ruido** — que el filtro paso alto quite el zumbido de 50 Hz, que la
+  ganancia se calcule con la voz y no con los silencios ni los golpes, y que
+  el limitador no dependa del bloque.
+- **Alucinaciones** — que se descarten las frases que Whisper inventa sobre
+  silencio y los bucles de repetición.
+- **Voz del profesor** — que una pregunta de un alumno a mitad de segmento no
+  acabe en su transcripción, y que el salto de una sola palabra se suavice.
+- **Realineado del LLM** — que si el modelo se salta una línea, el resto no
+  se desplace a timestamps ajenos.
+- **Degradación** — que sin CUDA, sin GPU con memoria suficiente, sin
+  noisereduce, sin micrófono o con Ollama caído el programa siga siendo útil
+  o falle con un mensaje accionable.
 
 ## Estructura
 

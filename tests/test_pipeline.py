@@ -40,7 +40,7 @@ def recording(tmp_path):
     return path
 
 
-def _options(recording: Path, **overrides) -> PipelineOptions:
+def _options(recording: Path | None, **overrides) -> PipelineOptions:
     defaults = dict(
         name="clase01",
         settings=config.resolve_settings(profile="low", device="cpu"),
@@ -190,3 +190,118 @@ def test_clear_session_removes_cache(workspace, recording, stages):
     pipeline.clear_session("clase01")
 
     assert not (config.SESSIONS_DIR / "clase01").exists()
+
+
+def test_pipeline_records_when_no_input_given(workspace, stages):
+    """Without --input the pipeline records first."""
+    stages["record"].side_effect = lambda path, duration, **kw: Path(path).write_bytes(b"RIFF")
+
+    run_pipeline(_options(None, input_path=None, duration=60))
+
+    stages["record"].assert_called_once()
+    assert stages["record"].call_args.args[1] == 60
+
+
+def test_pipeline_reuses_an_existing_recording_on_resume(workspace, stages):
+    """--resume does not re-record over a session's existing audio."""
+    session = config.SESSIONS_DIR / "clase01"
+    session.mkdir(parents=True)
+    (session / "raw.wav").write_bytes(b"RIFF")
+
+    run_pipeline(_options(None, input_path=None, resume=True))
+
+    stages["record"].assert_not_called()
+
+
+def test_pipeline_never_deletes_the_users_own_file(workspace, recording, stages):
+    """--no-keep-audio must not delete a recording the user supplied."""
+    run_pipeline(_options(recording, keep_audio=False))
+
+    assert recording.exists()
+
+
+def test_pipeline_deletes_its_own_recording_when_asked(workspace, stages):
+    """--no-keep-audio does delete audio the pipeline recorded itself."""
+    stages["record"].side_effect = lambda path, duration, **kw: Path(path).write_bytes(b"RIFF")
+
+    run_pipeline(_options(None, input_path=None, keep_audio=False))
+
+    assert not (config.SESSIONS_DIR / "clase01" / "raw.wav").exists()
+
+
+def test_pipeline_passes_speaker_hints_to_diarization(workspace, recording, stages):
+    """--num-speakers reaches pyannote, where it improves accuracy."""
+    run_pipeline(_options(recording, num_speakers=3))
+
+    assert stages["diarize"].call_args.kwargs["num_speakers"] == 3
+
+
+def test_pipeline_forwards_denoise_flag(workspace, recording, stages):
+    """--no-denoise reaches the preprocessor."""
+    run_pipeline(_options(recording, denoise=False))
+
+    assert stages["preprocess"].call_args.kwargs["denoise"] is False
+
+
+def test_pipeline_respects_explicit_professor(workspace, recording, stages):
+    """An explicit --professor overrides the airtime heuristic."""
+    run_pipeline(_options(recording, professor="SPEAKER_01"))
+
+    assert stages["clean"].call_args.kwargs["professor"] == "SPEAKER_01"
+
+
+def test_pipeline_professor_none_skips_the_professor_file(workspace, recording, stages):
+    """--professor none produces the full transcript only."""
+    outputs = run_pipeline(_options(recording, professor="none"))
+
+    assert "professor" not in outputs
+    assert "full" in outputs
+
+
+def test_pipeline_cleans_a_copy_not_the_merged_cache(workspace, recording, stages):
+    """The merged cache must stay pristine so --resume can re-clean it.
+
+    Cleaning in place would make a second run clean already-cleaned text.
+    """
+    stages["clean"].side_effect = lambda segments, **kw: [
+        {**segment, "text": "REWRITTEN"} for segment in segments
+    ]
+
+    run_pipeline(_options(recording))
+
+    merged = json.loads((config.SESSIONS_DIR / "clase01" / "merged.json").read_text())
+    assert all(segment["text"] != "REWRITTEN" for segment in merged)
+
+
+def test_pipeline_uses_word_level_attribution(workspace, recording, stages):
+    """Speaker labels come from the word timings when they are available."""
+    stages["transcribe"].return_value = [
+        {
+            "start": 0.0, "end": 6.0, "text": "Explico y luego preguntan",
+            "words": [
+                {"start": 0.0, "end": 1.0, "word": " Explico"},
+                {"start": 1.0, "end": 2.0, "word": " y"},
+                {"start": 2.0, "end": 3.0, "word": " luego"},
+                {"start": 4.6, "end": 5.4, "word": " preguntan"},
+            ],
+        }
+    ]
+    stages["diarize"].return_value = [
+        {"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"},
+        {"start": 4.3, "end": 6.0, "speaker": "SPEAKER_01"},
+    ]
+
+    outputs = run_pipeline(_options(recording))
+    professor_text = outputs["professor"].read_text(encoding="utf-8")
+
+    assert "Explico y luego" in professor_text
+    assert "preguntan" not in professor_text
+
+
+def test_pipeline_logs_the_resolved_settings(workspace, recording, stages, caplog):
+    """The run starts by stating which model and device it will use."""
+    with caplog.at_level("INFO"):
+        run_pipeline(_options(recording))
+
+    assert "profile=low" in caplog.text
+    assert "device=cpu" in caplog.text

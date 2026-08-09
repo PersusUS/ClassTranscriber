@@ -206,33 +206,14 @@ def _export_all(
     options: PipelineOptions,
     professor: str | None,
 ) -> dict[str, Path]:
-    """Writes every requested output format."""
-    outputs: dict[str, Path] = {}
-    formats = set(options.formats)
-    names = {professor: "PROFESOR"} if professor else None
-
-    if "txt" in formats:
-        path = config.OUTPUT_DIR / f"{options.name}_completo.txt"
-        outputs["full"] = exporter.export(segments, path, speaker_names=names)
-
-    if "professor" in formats and professor:
-        path = config.OUTPUT_DIR / f"{options.name}_profesor.txt"
-        outputs["professor"] = exporter.export_professor(segments, professor, path)
-
-    if "md" in formats:
-        path = config.OUTPUT_DIR / f"{options.name}.md"
-        outputs["markdown"] = exporter.export_markdown(
-            segments, path, title=options.name, professor=professor
-        )
-
-    if "srt" in formats:
-        path = config.OUTPUT_DIR / f"{options.name}.srt"
-        outputs["subtitles"] = exporter.export_srt(segments, path)
-
-    if "json" in formats:
-        path = config.OUTPUT_DIR / f"{options.name}.json"
-        _write_json(path, segments)
-        outputs["json"] = path
+    """Writes every requested output format, plus the speaker breakdown."""
+    outputs = exporter.write_outputs(
+        segments,
+        name=options.name,
+        output_dir=config.OUTPUT_DIR,
+        formats=options.formats,
+        professor=professor,
+    )
 
     stats_path = session_dir(options.name) / "speakers.json"
     _write_json(stats_path, speaker_stats(segments))

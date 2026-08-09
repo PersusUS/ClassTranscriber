@@ -193,3 +193,114 @@ def test_merge_turns_respects_gap_and_length():
 def test_merge_turns_empty():
     """An empty list merges to an empty list."""
     assert merge_turns([]) == []
+
+
+def test_merge_with_no_word_timings_in_some_segments():
+    """A mix of word-timed and plain segments is handled in one pass."""
+    diarization = [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 5.0, "speaker": "SPEAKER_01"},
+    ]
+    transcription = [
+        {
+            "start": 0.0, "end": 2.0, "text": "con palabras",
+            "words": [
+                {"start": 0.0, "end": 0.8, "word": " con"},
+                {"start": 0.8, "end": 1.8, "word": " palabras"},
+            ],
+        },
+        {"start": 2.2, "end": 4.5, "text": "sin palabras"},
+    ]
+
+    result = merge(diarization, transcription)
+
+    assert [segment["speaker"] for segment in result] == ["SPEAKER_00", "SPEAKER_01"]
+    assert result[1]["text"] == "sin palabras"
+
+
+def test_merge_smooths_only_isolated_flips():
+    """A genuine two-word interjection is preserved, not smoothed away."""
+    diarization = [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.2, "speaker": "SPEAKER_01"},
+        {"start": 2.2, "end": 4.0, "speaker": "SPEAKER_00"},
+    ]
+    transcription = [
+        {
+            "start": 0.0, "end": 4.0, "text": "uno dos tres cuatro",
+            "words": [
+                {"start": 0.0, "end": 0.9, "word": " uno"},
+                {"start": 1.1, "end": 1.5, "word": " dos"},
+                {"start": 1.6, "end": 2.1, "word": " tres"},
+                {"start": 2.4, "end": 3.0, "word": " cuatro"},
+            ],
+        }
+    ]
+
+    result = merge(diarization, transcription)
+
+    assert [segment["speaker"] for segment in result] == [
+        "SPEAKER_00", "SPEAKER_01", "SPEAKER_00",
+    ]
+
+
+def test_merge_handles_overlapping_diarization():
+    """Overlapping speech (two people at once) still resolves to one label."""
+    diarization = [
+        {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+        {"start": 3.0, "end": 8.0, "speaker": "SPEAKER_01"},
+    ]
+
+    result = merge(diarization, [{"start": 3.5, "end": 7.5, "text": "solapado"}])
+
+    assert result[0]["speaker"] == "SPEAKER_01"
+
+
+def test_merge_turns_keeps_unknown_separate():
+    """UNKNOWN text is not folded into a neighbouring speaker's turn."""
+    segments = [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "text": "hola"},
+        {"start": 1.1, "end": 2.0, "speaker": "UNKNOWN", "text": "ruido"},
+        {"start": 2.1, "end": 3.0, "speaker": "SPEAKER_00", "text": "adiós"},
+    ]
+
+    assert len(merge_turns(segments)) == 3
+
+
+def test_merge_turns_does_not_mutate_the_input():
+    """Turn grouping returns new dicts so the cached merge stays intact."""
+    segments = [
+        {"start": 0.0, "end": 1.0, "speaker": "A", "text": "uno"},
+        {"start": 1.1, "end": 2.0, "speaker": "A", "text": "dos"},
+    ]
+
+    merge_turns(segments)
+
+    assert segments[0]["text"] == "uno"
+    assert segments[0]["end"] == 1.0
+
+
+def test_merge_drops_words_that_become_empty():
+    """Whitespace-only word tokens do not create empty segments."""
+    diarization = [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}]
+    transcription = [
+        {
+            "start": 0.0, "end": 3.0, "text": "hola",
+            "words": [
+                {"start": 0.0, "end": 0.5, "word": " "},
+                {"start": 0.5, "end": 1.0, "word": " hola"},
+            ],
+        }
+    ]
+
+    result = merge(diarization, transcription)
+
+    assert len(result) == 1
+    assert result[0]["text"] == "hola"
+
+
+def test_speaker_index_without_segments():
+    """The index answers UNKNOWN rather than failing on empty diarization."""
+    from modules.merger import UNKNOWN_SPEAKER, _SpeakerIndex
+
+    assert _SpeakerIndex([]).best_speaker(0.0, 1.0) == (UNKNOWN_SPEAKER, 0.0)
