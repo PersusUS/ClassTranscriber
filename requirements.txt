@@ -1,13 +1,25 @@
+# Core audio I/O and DSP
 sounddevice==0.5.1
 soundfile==0.12.1
 numpy==1.26.4
+scipy==1.13.1
 noisereduce==3.0.3
+
+# Speech recognition and speaker diarization
 faster-whisper==1.1.0
 pyannote.audio==3.3.2
-# Install PyTorch with CUDA 12.1 separately:
-# pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+
+# PyTorch — install it BEFORE this file, choosing the right build:
+#   CPU only (laptop, low resource use):
+#     pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+#   NVIDIA GPU with CUDA 12:
+#     pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
 torch==2.3.1
 torchaudio==2.3.1
+
+# Local LLM cleanup
 ollama==0.4.4
+
+# Tooling
 python-dotenv==1.0.1
 pytest==8.3.3

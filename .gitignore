@@ -7,6 +7,9 @@ audio/
 # Output (generated transcripts)
 output/
 
+# Per-session intermediate artifacts (audio + JSON caches)
+sessions/
+
 # WAV and audio files anywhere
 *.wav
 *.mp3

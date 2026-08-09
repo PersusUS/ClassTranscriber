@@ -1,114 +1,199 @@
 """Unit tests for M4 — modules/transcriber.py."""
 
+import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+import config
+import modules.transcriber as transcriber_mod
+from modules.transcriber import _filter_segments, is_hallucination, transcribe
+
+
+class FakeWord:
+    """Mimics a faster-whisper word with timings."""
+
+    def __init__(self, start: float, end: float, word: str):
+        self.start = start
+        self.end = end
+        self.word = word
 
 
 class FakeSegment:
     """Mimics a faster-whisper transcription segment."""
 
-    def __init__(self, start: float, end: float, text: str):
+    def __init__(self, start, end, text, avg_logprob=-0.2, no_speech_prob=0.05, words=None):
         self.start = start
         self.end = end
         self.text = text
+        self.avg_logprob = avg_logprob
+        self.no_speech_prob = no_speech_prob
+        self.words = words
 
 
 class FakeInfo:
     """Mimics the faster-whisper transcription info object."""
 
-    def __init__(self):
-        self.language = "en"
-        self.language_probability = 0.98
+    language = "es"
+    language_probability = 0.98
+    duration = 12.0
 
 
-def _build_mock_model():
-    """Returns a MagicMock that behaves like WhisperModel."""
-    mock_model = MagicMock()
-    fake_segments = [
-        FakeSegment(0.0, 5.0, "Hello everyone."),
-        FakeSegment(5.5, 12.0, "Today we discuss distributed systems."),
+@pytest.fixture(autouse=True)
+def clear_model_cache():
+    """Keeps the module-level model cache from leaking between tests."""
+    transcriber_mod._models.clear()
+    yield
+    transcriber_mod._models.clear()
+
+
+def _mock_model(segments=None):
+    """Returns a MagicMock behaving like WhisperModel."""
+    segments = segments if segments is not None else [
+        FakeSegment(0.0, 5.0, "Buenos días a todos."),
+        FakeSegment(5.5, 12.0, "Hoy vemos sistemas distribuidos."),
     ]
-    mock_model.transcribe.return_value = (iter(fake_segments), FakeInfo())
-    return mock_model
+    model = MagicMock()
+    model.transcribe.return_value = (iter(segments), FakeInfo())
+    return model
 
 
-@patch("modules.transcriber.WhisperModel")
-def test_transcribe_returns_list(mock_whisper_cls, tmp_path):
-    """Mock WhisperModel. Assert return type is list."""
-    import modules.transcriber as mod
-    mod._model = None  # reset singleton
+@patch("modules.transcriber._load_model")
+def test_transcribe_returns_list(mock_load, tmp_path):
+    """Assert the return type is a list of dicts."""
+    mock_load.return_value = _mock_model()
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    mock_whisper_cls.return_value = _build_mock_model()
+    result = transcribe(audio)
 
-    audio_file = tmp_path / "test.wav"
-    audio_file.touch()
-
-    from modules.transcriber import transcribe
-    result = transcribe(audio_file, language="en")
     assert isinstance(result, list)
+    assert len(result) == 2
 
-    mod._model = None  # cleanup
+
+@patch("modules.transcriber._load_model")
+def test_transcribe_segment_keys(mock_load, tmp_path):
+    """Assert each segment carries timings, text and confidence data."""
+    mock_load.return_value = _mock_model()
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    for segment in transcribe(audio):
+        assert {"start", "end", "text", "avg_logprob", "no_speech_prob"} <= set(segment)
 
 
-@patch("modules.transcriber.WhisperModel")
-def test_transcribe_segment_keys(mock_whisper_cls, tmp_path):
-    """Assert each dict contains 'start', 'end', 'text'."""
-    import modules.transcriber as mod
-    mod._model = None
+@patch("modules.transcriber._load_model")
+def test_transcribe_keeps_word_timestamps(mock_load, tmp_path):
+    """Word timings must survive into the output — the merger needs them."""
+    words = [FakeWord(0.0, 0.4, " Buenos"), FakeWord(0.4, 0.9, " días")]
+    mock_load.return_value = _mock_model([FakeSegment(0.0, 1.0, "Buenos días", words=words)])
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    mock_whisper_cls.return_value = _build_mock_model()
+    result = transcribe(audio)
 
-    audio_file = tmp_path / "test.wav"
-    audio_file.touch()
+    assert result[0]["words"][1]["word"] == " días"
 
-    from modules.transcriber import transcribe
-    result = transcribe(audio_file, language="en")
-    for segment in result:
-        assert "start" in segment
-        assert "end" in segment
-        assert "text" in segment
 
-    mod._model = None
+@patch("modules.transcriber._load_model")
+def test_transcribe_uses_spanish_by_default(mock_load, tmp_path):
+    """The default language must be Spanish, with the lecture prompt attached."""
+    model = _mock_model()
+    mock_load.return_value = model
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    transcribe(audio)
+
+    kwargs = model.transcribe.call_args.kwargs
+    assert kwargs["language"] == "es"
+    assert "clase universitaria" in kwargs["initial_prompt"]
+    # Feeding Whisper its own output is what causes repetition loops in noise.
+    assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["vad_filter"] is True
 
 
 def test_transcribe_invalid_path():
-    """Assert FileNotFoundError for missing file."""
-    from modules.transcriber import transcribe
-    bad_path = Path("/nonexistent/audio.wav")
+    """Assert FileNotFoundError for a missing file."""
     with pytest.raises(FileNotFoundError):
-        transcribe(bad_path)
+        transcribe(Path("/nonexistent/audio.wav"))
 
 
-@patch("modules.transcriber.WhisperModel")
-def test_model_singleton(mock_whisper_cls, tmp_path):
-    """Call transcribe() twice. Assert WhisperModel constructor is called only once."""
-    import modules.transcriber as mod
-    mod._model = None
+def test_model_is_cached(tmp_path, monkeypatch):
+    """Two transcriptions with the same settings load the weights once."""
+    constructor = MagicMock(return_value=_mock_model())
+    fake_module = MagicMock()
+    fake_module.WhisperModel = constructor
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
 
-    mock_model = _build_mock_model()
-    mock_whisper_cls.return_value = mock_model
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    audio_file = tmp_path / "test.wav"
-    audio_file.touch()
+    settings = config.resolve_settings(profile="low", device="cpu")
+    transcribe(audio, settings=settings)
+    constructor.return_value.transcribe.return_value = (iter([]), FakeInfo())
+    transcribe(audio, settings=settings)
 
-    from modules.transcriber import transcribe
+    assert constructor.call_count == 1
 
-    # First call — model gets created
-    mock_model.transcribe.return_value = (
-        iter([FakeSegment(0.0, 5.0, "First call.")]),
-        FakeInfo(),
-    )
-    transcribe(audio_file, language="en")
 
-    # Second call — model should be reused
-    mock_model.transcribe.return_value = (
-        iter([FakeSegment(0.0, 5.0, "Second call.")]),
-        FakeInfo(),
-    )
-    transcribe(audio_file, language="en")
+def test_model_falls_back_to_cpu(tmp_path, monkeypatch):
+    """A GPU that cannot load the model must fall back instead of failing."""
+    attempts = []
 
-    assert mock_whisper_cls.call_count == 1
+    def constructor(model, device, compute_type, cpu_threads):
+        attempts.append((device, compute_type))
+        if device == "cuda":
+            raise RuntimeError("CUDA failed to initialize")
+        return _mock_model()
 
-    mod._model = None
+    fake_module = MagicMock()
+    fake_module.WhisperModel = constructor
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    settings = config.resolve_settings(profile="low", device="cpu")
+    settings.device = "cuda"        # Force the CUDA attempt
+    settings.compute_type = "float16"
+
+    transcribe(audio, settings=settings)
+
+    assert attempts[0][0] == "cuda"
+    assert attempts[-1] == ("cpu", "int8")
+
+
+def test_is_hallucination_detects_amara():
+    """The classic Spanish silence hallucination must be recognised."""
+    assert is_hallucination("Subtítulos realizados por la comunidad de Amara.org")
+    assert is_hallucination("   ")
+    assert not is_hallucination("La transformada de Fourier convierte tiempo en frecuencia.")
+
+
+def test_filter_segments_drops_noise():
+    """Hallucinations, low-confidence output and loops are all removed."""
+    segments = [
+        {"text": "Contenido válido.", "avg_logprob": -0.3, "no_speech_prob": 0.1},
+        {"text": "Subtítulos realizados por la comunidad de Amara.org",
+         "avg_logprob": -0.2, "no_speech_prob": 0.1},
+        {"text": "Ruido ininteligible", "avg_logprob": -2.5, "no_speech_prob": 0.1},
+        {"text": "Silencio", "avg_logprob": -0.2, "no_speech_prob": 0.99},
+    ]
+
+    kept = _filter_segments(segments)
+
+    assert [segment["text"] for segment in kept] == ["Contenido válido."]
+
+
+def test_filter_segments_keeps_first_repetition():
+    """A decoding loop keeps one copy, not all of them."""
+    segments = [
+        {"text": "y ya está", "avg_logprob": -0.3, "no_speech_prob": 0.1}
+        for _ in range(5)
+    ]
+
+    kept = _filter_segments(segments)
+
+    assert len(kept) == 2      # The first plus one repeat before the loop is detected

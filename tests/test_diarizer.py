@@ -1,11 +1,12 @@
 """Unit tests for M3 — modules/diarizer.py."""
 
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modules.diarizer import diarize
+import modules.diarizer as diarizer_mod
+from modules.diarizer import _resolve_device, diarize
 
 
 class FakeSegment:
@@ -26,81 +27,103 @@ class FakeDiarization:
         return iter(self._tracks)
 
 
+@pytest.fixture(autouse=True)
+def clear_pipeline_cache():
+    """Prevents the cached pipeline from leaking between tests."""
+    diarizer_mod._pipelines.clear()
+    yield
+    diarizer_mod._pipelines.clear()
+
+
+def _pipeline_returning(tracks):
+    """Builds a mock pipeline yielding the given tracks."""
+    pipeline = MagicMock()
+    pipeline.return_value = FakeDiarization(tracks)
+    return pipeline
+
+
 @pytest.fixture
 def fake_pipeline():
-    """Builds a mock pipeline that returns two speaker segments."""
-    tracks = [
-        (FakeSegment(0.0, 5.0), None, "SPEAKER_00"),
-        (FakeSegment(5.5, 12.0), None, "SPEAKER_01"),
-        (FakeSegment(12.5, 20.0), None, "SPEAKER_00"),
-    ]
-    diarization_result = FakeDiarization(tracks)
-
-    pipeline_instance = MagicMock()
-    pipeline_instance.return_value = diarization_result
-    return pipeline_instance
+    """A pipeline that returns three segments from two speakers."""
+    return _pipeline_returning(
+        [
+            (FakeSegment(0.0, 5.0), None, "SPEAKER_00"),
+            (FakeSegment(5.5, 12.0), None, "SPEAKER_01"),
+            (FakeSegment(12.5, 20.0), None, "SPEAKER_00"),
+        ]
+    )
 
 
-@patch("modules.diarizer.torch")
-@patch("modules.diarizer.Pipeline")
-def test_diarize_returns_list(mock_pipeline_cls, mock_torch, fake_pipeline, tmp_path):
-    """Mock the pipeline. Assert return type is list."""
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda"
-    mock_pipeline_cls.from_pretrained.return_value = fake_pipeline
+@patch("modules.diarizer._load_pipeline")
+def test_diarize_returns_list(mock_load, fake_pipeline, tmp_path):
+    """Assert the return type is a list."""
+    mock_load.return_value = fake_pipeline
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    audio_file = tmp_path / "test.wav"
-    audio_file.touch()
-
-    result = diarize(audio_file, hf_token="fake_token")
-    assert isinstance(result, list)
+    assert isinstance(diarize(audio, hf_token="fake_token"), list)
 
 
-@patch("modules.diarizer.torch")
-@patch("modules.diarizer.Pipeline")
-def test_diarize_segment_keys(mock_pipeline_cls, mock_torch, fake_pipeline, tmp_path):
-    """Assert each dict in the result contains keys 'start', 'end', 'speaker'."""
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda"
-    mock_pipeline_cls.from_pretrained.return_value = fake_pipeline
+@patch("modules.diarizer._load_pipeline")
+def test_diarize_segment_keys(mock_load, fake_pipeline, tmp_path):
+    """Assert each dict contains 'start', 'end' and 'speaker'."""
+    mock_load.return_value = fake_pipeline
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    audio_file = tmp_path / "test.wav"
-    audio_file.touch()
-
-    result = diarize(audio_file, hf_token="fake_token")
-    for segment in result:
-        assert "start" in segment
-        assert "end" in segment
-        assert "speaker" in segment
+    for segment in diarize(audio, hf_token="fake_token"):
+        assert {"start", "end", "speaker"} <= set(segment)
 
 
-@patch("modules.diarizer.torch")
-@patch("modules.diarizer.Pipeline")
-def test_diarize_sorted_by_start(mock_pipeline_cls, mock_torch, tmp_path):
-    """Assert segments are sorted by 'start' ascending."""
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda"
+@patch("modules.diarizer._load_pipeline")
+def test_diarize_sorted_by_start(mock_load, tmp_path):
+    """Assert segments come back sorted by start time."""
+    mock_load.return_value = _pipeline_returning(
+        [
+            (FakeSegment(10.0, 15.0), None, "SPEAKER_01"),
+            (FakeSegment(0.0, 5.0), None, "SPEAKER_00"),
+            (FakeSegment(5.5, 9.0), None, "SPEAKER_00"),
+        ]
+    )
+    audio = tmp_path / "test.wav"
+    audio.touch()
 
-    # Provide tracks in unsorted order
-    tracks = [
-        (FakeSegment(10.0, 15.0), None, "SPEAKER_01"),
-        (FakeSegment(0.0, 5.0), None, "SPEAKER_00"),
-        (FakeSegment(5.5, 9.0), None, "SPEAKER_00"),
-    ]
-    pipeline_instance = MagicMock()
-    pipeline_instance.return_value = FakeDiarization(tracks)
-    mock_pipeline_cls.from_pretrained.return_value = pipeline_instance
+    starts = [segment["start"] for segment in diarize(audio, hf_token="fake_token")]
 
-    audio_file = tmp_path / "test.wav"
-    audio_file.touch()
-
-    result = diarize(audio_file, hf_token="fake_token")
-    starts = [s["start"] for s in result]
     assert starts == sorted(starts)
 
 
+@patch("modules.diarizer._load_pipeline")
+def test_diarize_passes_exact_speaker_count(mock_load, fake_pipeline, tmp_path):
+    """num_speakers must replace the min/max bounds when given."""
+    mock_load.return_value = fake_pipeline
+    audio = tmp_path / "test.wav"
+    audio.touch()
+
+    diarize(audio, hf_token="fake_token", num_speakers=3)
+
+    kwargs = fake_pipeline.call_args.kwargs
+    assert kwargs["num_speakers"] == 3
+    assert "max_speakers" not in kwargs
+
+
 def test_diarize_invalid_path():
-    """Assert FileNotFoundError is raised for missing file."""
-    bad_path = Path("/nonexistent/audio.wav")
+    """Assert FileNotFoundError for a missing file."""
     with pytest.raises(FileNotFoundError):
-        diarize(bad_path, hf_token="fake_token")
+        diarize(Path("/nonexistent/audio.wav"), hf_token="fake_token")
+
+
+def test_resolve_device_falls_back_to_cpu(monkeypatch):
+    """Requesting CUDA on a machine without it must not fail — CPU is fine."""
+    monkeypatch.setattr("config.cuda_available", lambda: False)
+
+    assert _resolve_device("cuda") == "cpu"
+    assert _resolve_device("auto") == "cpu"
+    assert _resolve_device("cpu") == "cpu"
+
+
+def test_resolve_device_prefers_cuda_when_present(monkeypatch):
+    """With CUDA available, 'auto' selects the GPU."""
+    monkeypatch.setattr("config.cuda_available", lambda: True)
+
+    assert _resolve_device("auto") == "cuda"
