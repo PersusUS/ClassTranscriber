@@ -155,7 +155,10 @@ def export(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w", encoding="utf-8") as handle:
-        handle.write(f"# ClassTranscriber — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
+        handle.write(
+            f"# {output_path.stem} — transcripción completa — "
+            f"{datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+        )
 
         previous_speaker = None
         for segment in segments:
@@ -229,10 +232,12 @@ def export_professor(
     word_count = sum(len(segment["text"].split()) for segment in speech)
 
     with open(output_path, "w", encoding="utf-8") as handle:
-        handle.write(f"# {output_path.stem} — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
         handle.write(
-            f"# Professor only ({professor}) — "
-            f"{format_timestamp(total_seconds)} of speech, {word_count} words\n\n"
+            f"# {output_path.stem} — {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+        )
+        handle.write(
+            f"# Solo el profesor ({professor}) — "
+            f"{format_timestamp(total_seconds)} de habla, {word_count} palabras\n\n"
         )
 
         last_marker = -marker_interval
@@ -275,7 +280,7 @@ def export_markdown(
 
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(f"# {title}\n\n")
-        handle.write(f"_{datetime.now().strftime('%Y-%m-%d %H:%M')}_\n\n")
+        handle.write(f"_{datetime.now().strftime('%d/%m/%Y %H:%M')}_\n\n")
 
         previous_speaker = None
         for segment in segments:

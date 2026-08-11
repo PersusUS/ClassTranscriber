@@ -221,7 +221,7 @@ def test_export_professor_counts_only_the_professor_speech(tmp_path: Path):
     output = tmp_path / "profesor.txt"
     export_professor(segments, "P", output)
 
-    assert "00:00:20 of speech" in output.read_text(encoding="utf-8")
+    assert "00:00:20 de habla" in output.read_text(encoding="utf-8")
 
 
 def test_export_markdown_rejects_empty(tmp_path: Path):
@@ -257,3 +257,31 @@ def test_export_professor_without_time_markers(tmp_path: Path):
 
     body = output.read_text(encoding="utf-8").split("\n\n", 1)[1]
     assert "[00:15:00]" not in body
+
+
+def test_export_headers_are_in_spanish(tmp_path: Path):
+    """The files the user actually reads are written in Spanish.
+
+    The transcript body is Spanish, so an English header in the same file
+    is just noise — including for the LLM that gets fed the professor file.
+    """
+    professor_file = tmp_path / "clase_profesor.txt"
+    full_file = tmp_path / "clase_completo.txt"
+    export_professor(_make_segments(), "SPEAKER_00", professor_file)
+    export(_make_segments(), full_file)
+
+    professor_header = professor_file.read_text(encoding="utf-8").splitlines()[1]
+    full_header = full_file.read_text(encoding="utf-8").splitlines()[0]
+
+    assert "Solo el profesor" in professor_header
+    assert "de habla" in professor_header
+    assert "palabras" in professor_header
+    assert "transcripción completa" in full_header
+
+
+def test_export_dates_use_day_first(tmp_path: Path):
+    """Dates read as DD/MM/YYYY, which is what a Spanish reader expects."""
+    output = tmp_path / "clase.txt"
+    export(_make_segments(), output)
+
+    assert re.search(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}", output.read_text(encoding="utf-8"))
