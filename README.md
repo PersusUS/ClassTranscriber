@@ -94,7 +94,39 @@ micrófono hay y qué falta por configurar. No falla: solo informa.
 
 ---
 
-## Uso
+## Uso con ventana (lo más cómodo)
+
+En Windows, **doble clic en `ClassTranscriber.bat`**. Desde el terminal:
+
+```bash
+python gui.py          # o: python main.py gui
+```
+
+Una sola ventana: nombre de la clase (ya viene rellenado con la fecha),
+micrófono, duración opcional, y tres casillas para el ruido, la separación de
+voces y la corrección con IA. Debajo:
+
+- **Medidor de nivel en directo.** Es lo más útil antes de que empiece la
+  clase: te dice si el micrófono está llegando al profesor («Se oye muy bajo
+  — acerca el micrófono») o si satura, sin esperar a ver la transcripción.
+- **Lista de etapas** con su estado, para saber por dónde va y qué se ha
+  saltado.
+- **Parar y procesar**: corta la grabación cuando acabe la clase y sigue con
+  lo grabado.
+- **Procesar un audio…**: usa una grabación que ya tengas, sin micrófono.
+- **Abrir transcripción**: abre el fichero del profesor al terminar.
+
+Tkinter viene incluido en Python, así que la ventana no añade ninguna
+dependencia y consume unos 30 MB. Si te falta en Linux:
+`sudo apt install python3-tk`.
+
+Antes de arrancar comprueba lo que hace falta y, si algo no está (Ollama
+apagado, token sin configurar), te lo dice **antes** de grabar y te indica qué
+casilla desmarcar para seguir igualmente.
+
+---
+
+## Uso desde el terminal
 
 ### Una clase entera
 
@@ -254,10 +286,13 @@ Algunas decisiones que explican por qué funciona en aulas ruidosas:
 pytest
 ```
 
-297 tests unitarios, 99 % de cobertura del código fuente. No necesitan GPU,
+388 tests unitarios, 99 % de cobertura del código fuente. No necesitan GPU,
 ni micrófono, ni modelos descargados: Whisper, pyannote, Ollama, PortAudio y
 CUDA están simulados, así que la batería entera tarda un par de segundos
 (algo más la primera vez, mientras se importan numpy y scipy).
+
+De esos, 37 son de la ventana y necesitan Tkinter y una pantalla: si no las
+hay se saltan solos, así que en un servidor verás 351 pasados y 1 saltado.
 
 Para ver la cobertura:
 
@@ -283,12 +318,18 @@ Lo que cubren, además de los casos normales de cada módulo:
 - **Degradación** — que sin CUDA, sin GPU con memoria suficiente, sin
   noisereduce, sin micrófono o con Ollama caído el programa siga siendo útil
   o falle con un mensaje accionable.
+- **La ventana** — que no arranque dos procesos con un doble clic, que el
+  botón de Parar termine la grabación conservando el audio, que un fallo del
+  hilo de trabajo llegue a la pantalla y que un medidor roto no cueste la
+  clase. Los tests de widgets se saltan solos si no hay pantalla o Tkinter.
 
 ## Estructura
 
 ```
 ClassTranscriber/
 ├── main.py                 # CLI
+├── gui.py                  # Ventana de escritorio (Tkinter)
+├── ClassTranscriber.bat    # Doble clic en Windows
 ├── config.py               # Perfiles y todos los ajustes
 ├── modules/
 │   ├── audio_utils.py      # DSP y utilidades de streaming
@@ -298,6 +339,7 @@ ClassTranscriber/
 │   ├── transcriber.py      # M4 — Whisper
 │   ├── merger.py           # M5 — alineación voz/texto
 │   ├── speaker_id.py       # Identificación del profesor
+│   ├── gui_state.py        # Lógica de la ventana (sin Tkinter)
 │   ├── cleaner.py          # M6 — corrección con LLM
 │   ├── exporter.py         # M7 — ficheros de salida
 │   └── pipeline.py         # Orquestación y reanudación

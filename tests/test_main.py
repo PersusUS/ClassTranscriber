@@ -614,3 +614,26 @@ def test_validate_environment_reports_every_problem_at_once(workspace, caplog, m
                 main.validate_environment({"ollama", "hf_token", "microphone"})
 
     assert "[3]" in caplog.text
+
+
+def test_cmd_gui_opens_the_window(monkeypatch):
+    """`main.py gui` hands over to the desktop window."""
+    fake_gui = MagicMock()
+    monkeypatch.setitem(sys.modules, "gui", fake_gui)
+
+    main.cmd_gui(_parse("gui"))
+
+    fake_gui.run.assert_called_once()
+
+
+def test_cmd_gui_explains_a_missing_tkinter(monkeypatch):
+    """Without Tkinter the user gets the install command, not a traceback."""
+    monkeypatch.setitem(sys.modules, "gui", None)
+
+    with pytest.raises(RuntimeError, match="python3-tk"):
+        main.cmd_gui(_parse("gui"))
+
+
+def test_gui_command_needs_nothing_upfront():
+    """The window checks its own prerequisites and explains them in a dialog."""
+    assert main.requirements_for(_parse("gui")) == set()

@@ -305,3 +305,77 @@ def test_pipeline_logs_the_resolved_settings(workspace, recording, stages, caplo
 
     assert "profile=low" in caplog.text
     assert "device=cpu" in caplog.text
+
+
+def test_pipeline_reports_stage_progress(workspace, recording, stages):
+    """The GUI's checklist is driven by these callbacks."""
+    seen = []
+
+    run_pipeline(_options(recording, on_stage=lambda key, status: seen.append((key, status))))
+
+    assert ("transcribe", "running") in seen
+    assert ("transcribe", "done") in seen
+    assert ("export", "done") in seen
+    # A supplied recording means nothing was recorded.
+    assert ("record", "skipped") in seen
+
+
+def test_pipeline_marks_disabled_stages_as_skipped(workspace, recording, stages):
+    """Turning a feature off shows as skipped, not as pending forever."""
+    seen = []
+
+    run_pipeline(
+        _options(
+            recording,
+            diarize_enabled=False,
+            clean_enabled=False,
+            on_stage=lambda key, status: seen.append((key, status)),
+        )
+    )
+
+    assert ("diarize", "skipped") in seen
+    assert ("clean", "skipped") in seen
+
+
+def test_pipeline_reports_reused_stages_as_skipped(workspace, recording, stages):
+    """On --resume the cached stages are marked skipped for the user."""
+    run_pipeline(_options(recording))
+    seen = []
+
+    run_pipeline(_options(recording, resume=True,
+                          on_stage=lambda key, status: seen.append((key, status))))
+
+    assert ("transcribe", "skipped") in seen
+    assert ("diarize", "skipped") in seen
+
+
+def test_pipeline_forwards_the_stop_event_and_meter(workspace, stages):
+    """Both GUI hooks reach the recorder."""
+    import threading
+
+    event = threading.Event()
+    meter = lambda *args: None      # noqa: E731 - identity is what is checked
+    stages["record"].side_effect = lambda path, duration, **kw: Path(path).write_bytes(b"RIFF")
+
+    run_pipeline(_options(None, input_path=None, stop_event=event, on_level=meter))
+
+    assert stages["record"].call_args.kwargs["stop_event"] is event
+    assert stages["record"].call_args.kwargs["on_level"] is meter
+
+
+def test_pipeline_survives_a_broken_progress_callback(workspace, recording, stages):
+    """A crashing GUI callback must not take the transcript down with it."""
+    def explode(key, status):
+        raise ValueError("ventana cerrada")
+
+    outputs = run_pipeline(_options(recording, on_stage=explode))
+
+    assert outputs["professor"].exists()
+
+
+def test_stage_list_matches_the_labels():
+    """The pipeline's stages and the window's labels stay in step."""
+    from modules.gui_state import STAGE_LABELS
+    from modules.pipeline import STAGES
+
+    assert tuple(key for key, _ in STAGE_LABELS) == STAGES

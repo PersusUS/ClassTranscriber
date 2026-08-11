@@ -11,8 +11,10 @@ the LLM cleanup, then costs seconds instead of an hour.
 import json
 import logging
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import config
 from config import Settings
@@ -48,6 +50,14 @@ class PipelineOptions:
     hf_token: str | None = None
     formats: tuple[str, ...] = ("txt", "professor")
     keep_audio: bool = True
+
+    # Hooks used by the GUI. A Stop button cannot deliver a KeyboardInterrupt
+    # to a worker thread, and a progress window needs to be told where the
+    # run has got to.
+    stop_event: threading.Event | None = None
+    on_level: Callable[[float, float, float], None] | None = None
+    on_stage: Callable[[str, str], None] | None = None
+
     extra: dict = field(default_factory=dict)
 
 
@@ -75,6 +85,25 @@ def _cached(path: Path, resume: bool, label: str):
         logger.info("Reusing cached %s from %s", label, path.name)
         return _read_json(path)
     return None
+
+
+# The stages a run goes through, in order. The GUI renders this list as a
+# checklist, so the keys are part of the contract.
+STAGES = ("record", "preprocess", "transcribe", "diarize", "merge", "clean", "export")
+
+
+def _stage(options: PipelineOptions, key: str, status: str) -> None:
+    """Reports stage progress to whoever is watching (the GUI, usually).
+
+    A failing progress callback must never take the run down with it — the
+    transcript matters more than the progress bar.
+    """
+    if options.on_stage is None:
+        return
+    try:
+        options.on_stage(key, status)
+    except Exception:       # noqa: BLE001
+        logger.exception("Progress callback failed — continuing the run")
 
 
 def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
@@ -106,25 +135,42 @@ def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
             raise FileNotFoundError(f"Input audio not found: {source}")
         logger.info("=== Step 1/6: Using existing recording %s ===", source)
         raw_path = source
+        _stage(options, "record", "skipped")
     elif options.resume and raw_path.exists():
         logger.info("=== Step 1/6: Reusing recording %s ===", raw_path.name)
+        _stage(options, "record", "skipped")
     else:
         logger.info("=== Step 1/6: Recording ===")
-        record(raw_path, options.duration, device=options.device)
+        _stage(options, "record", "running")
+        record(
+            raw_path,
+            options.duration,
+            device=options.device,
+            stop_event=options.stop_event,
+            on_level=options.on_level,
+        )
+        _stage(options, "record", "done")
 
     # --- 2. Preprocess ----------------------------------------------------
     if options.resume and clean_path.exists():
         logger.info("=== Step 2/6: Reusing preprocessed audio ===")
+        _stage(options, "preprocess", "skipped")
     else:
         logger.info("=== Step 2/6: Preprocessing ===")
+        _stage(options, "preprocess", "running")
         preprocess(raw_path, clean_path, denoise=options.denoise)
+        _stage(options, "preprocess", "done")
 
     # --- 3. Transcribe ----------------------------------------------------
     transcription = _cached(transcription_path, options.resume, "transcription")
     if transcription is None:
         logger.info("=== Step 3/6: Transcribing ===")
+        _stage(options, "transcribe", "running")
         transcription = transcribe(clean_path, settings=options.settings)
         _write_json(transcription_path, transcription)
+        _stage(options, "transcribe", "done")
+    else:
+        _stage(options, "transcribe", "skipped")
 
     if not transcription:
         raise RuntimeError(
@@ -137,6 +183,7 @@ def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
         diarization = _cached(diarization_path, options.resume, "diarization")
         if diarization is None:
             logger.info("=== Step 4/6: Diarizing ===")
+            _stage(options, "diarize", "running")
             diarization = diarize(
                 clean_path,
                 hf_token=options.hf_token,
@@ -145,10 +192,17 @@ def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
                 device=options.settings.device,
             )
             _write_json(diarization_path, diarization)
+            _stage(options, "diarize", "done")
+        else:
+            _stage(options, "diarize", "skipped")
 
+        _stage(options, "merge", "running")
         merged = merge_turns(merge(diarization, transcription))
+        _stage(options, "merge", "done")
     else:
         logger.info("=== Step 4/6: Diarization disabled — treating all speech as one speaker ===")
+        _stage(options, "diarize", "skipped")
+        _stage(options, "merge", "running")
         merged = merge_turns(
             [
                 {
@@ -160,6 +214,7 @@ def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
                 for segment in transcription
             ]
         )
+        _stage(options, "merge", "done")
 
     _write_json(merged_path, merged)
 
@@ -175,8 +230,10 @@ def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
         cached_clean = _cached(cleaned_path, options.resume, "cleaned transcript")
         if cached_clean is not None:
             segments = cached_clean
+            _stage(options, "clean", "skipped")
         else:
             logger.info("=== Step 5/6: Cleaning with the local LLM ===")
+            _stage(options, "clean", "running")
             segments = clean_transcript(
                 [dict(segment) for segment in merged],
                 model=options.settings.ollama_model,
@@ -184,12 +241,16 @@ def run_pipeline(options: PipelineOptions) -> dict[str, Path]:
                 language=options.settings.language,
             )
             _write_json(cleaned_path, segments)
+            _stage(options, "clean", "done")
     else:
         logger.info("=== Step 5/6: LLM cleanup disabled ===")
+        _stage(options, "clean", "skipped")
 
     # --- 6. Export --------------------------------------------------------
     logger.info("=== Step 6/6: Exporting ===")
+    _stage(options, "export", "running")
     outputs = _export_all(segments, options, professor)
+    _stage(options, "export", "done")
 
     if not options.keep_audio and options.input_path is None:
         raw_path.unlink(missing_ok=True)

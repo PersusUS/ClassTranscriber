@@ -217,3 +217,80 @@ def test_record_reports_level_periodically(mock_sd, output_dir: Path, caplog, mo
 
     reports = [line for line in caplog.text.splitlines() if "level" in line]
     assert len(reports) >= 3
+
+
+@patch("modules.recorder.sd")
+def test_record_stops_when_the_event_is_set(mock_sd, output_dir: Path):
+    """A Stop button ends an open-ended recording and keeps the audio.
+
+    A GUI cannot deliver a KeyboardInterrupt to a worker thread, so the
+    event is the only way to end a recording with no duration set.
+    """
+    import threading
+
+    stop = threading.Event()
+    stream = MagicMock()
+    reads = {"count": 0}
+
+    def read(frames):
+        reads["count"] += 1
+        if reads["count"] >= 3:
+            stop.set()
+        return np.zeros((frames, 1), dtype=np.float32), False
+
+    stream.read.side_effect = read
+    mock_sd.query_devices.return_value = {"name": "Test Microphone"}
+    mock_sd.InputStream.return_value.__enter__.return_value = stream
+
+    output_path = output_dir / "stopped.wav"
+    record(output_path, duration_seconds=None, sample_rate=16000, stop_event=stop)
+
+    assert sf.info(str(output_path)).frames == 3 * 16000
+
+
+@patch("modules.recorder.sd")
+def test_record_checks_the_event_before_reading(mock_sd, output_dir: Path):
+    """An event already set means nothing is recorded at all."""
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    _wire(mock_sd)
+
+    output_path = output_dir / "none.wav"
+    record(output_path, duration_seconds=60, stop_event=stop)
+
+    assert sf.info(str(output_path)).frames == 0
+
+
+@patch("modules.recorder.sd")
+def test_record_reports_levels_to_the_callback(mock_sd, output_dir: Path):
+    """The live meter gets one reading per block, with elapsed time."""
+    _wire(mock_sd)
+    readings = []
+
+    record(
+        output_dir / "levels.wav",
+        duration_seconds=3,
+        sample_rate=16000,
+        on_level=lambda elapsed, level, peak: readings.append((elapsed, level, peak)),
+    )
+
+    assert len(readings) == 3
+    assert [round(reading[0]) for reading in readings] == [1, 2, 3]
+
+
+@patch("modules.recorder.sd")
+def test_record_survives_a_broken_level_callback(mock_sd, output_dir: Path, caplog):
+    """A crashing meter must never cost the user the class."""
+    _wire(mock_sd)
+
+    def explode(elapsed, level, peak):
+        raise ValueError("widget destruido")
+
+    output_path = output_dir / "resilient.wav"
+    with caplog.at_level("ERROR"):
+        record(output_path, duration_seconds=2, sample_rate=16000, on_level=explode)
+
+    assert sf.info(str(output_path)).frames == 2 * 16000
+    assert "Level callback failed" in caplog.text

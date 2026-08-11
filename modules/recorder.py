@@ -8,8 +8,10 @@ and perfectly playable.
 """
 
 import logging
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import soundfile as sf
@@ -70,21 +72,31 @@ def record(
     channels: int = config.CHANNELS,
     device: int | str | None = None,
     subtype: str = config.RECORD_SUBTYPE,
+    stop_event: threading.Event | None = None,
+    on_level: Callable[[float, float, float], None] | None = None,
 ) -> Path:
     """Records audio from the microphone, streaming it to a WAV file.
 
-    Recording stops when `duration_seconds` elapses or when the user
-    presses Ctrl+C — an interrupt is a normal way to end a class, so the
-    partial recording is kept and returned rather than discarded.
+    Recording stops when `duration_seconds` elapses, when `stop_event` is
+    set, or when the user presses Ctrl+C — every one of those is a normal
+    way to end a class, so the partial recording is kept and returned
+    rather than discarded.
 
     Args:
         output_path: Destination path for the WAV file.
         duration_seconds: Maximum length in seconds, or None to record
-            until interrupted.
+            until stopped.
         sample_rate: Sample rate in Hz. Default 16000.
         channels: Number of channels to capture. Default 1 (mono).
         device: Input device index or name. None uses the system default.
         subtype: WAV encoding. PCM_16 halves file size versus float32.
+        stop_event: A `threading.Event` that ends the recording when set.
+            This is how a Stop button works, since a GUI cannot deliver a
+            KeyboardInterrupt to the worker thread.
+        on_level: Called once per block with
+            `(elapsed_seconds, level_dbfs, peak_dbfs)`. Used to drive a
+            live level meter; exceptions raised by it never interrupt the
+            recording.
 
     Returns:
         The path to the saved WAV file.
@@ -140,6 +152,13 @@ def record(
                 blocksize=block_frames,
             ) as stream:
                 while target_frames is None or frames_written < target_frames:
+                    if stop_event is not None and stop_event.is_set():
+                        logger.info(
+                            "Recording stopped on request after %.0f s",
+                            frames_written / sample_rate,
+                        )
+                        break
+
                     to_read = block_frames
                     if target_frames is not None:
                         to_read = min(block_frames, target_frames - frames_written)
@@ -156,10 +175,20 @@ def record(
                     frames_written += len(chunk)
 
                     mono = to_mono(chunk)
-                    window.append(dbfs(mono))
-                    window_peak = max(window_peak, peak_dbfs(mono))
+                    block_level = dbfs(mono)
+                    block_peak = peak_dbfs(mono)
+                    window.append(block_level)
+                    window_peak = max(window_peak, block_peak)
 
                     elapsed = frames_written / sample_rate
+
+                    if on_level is not None:
+                        # A broken meter must never cost the user the class.
+                        try:
+                            on_level(elapsed, block_level, block_peak)
+                        except Exception:       # noqa: BLE001
+                            logger.exception("Level callback failed — continuing to record")
+
                     if elapsed >= next_report:
                         _report_level(elapsed, target_frames, sample_rate, window, window_peak)
                         window = []

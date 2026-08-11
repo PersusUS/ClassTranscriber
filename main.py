@@ -48,6 +48,7 @@ REQUIREMENTS = {
     "clean": {"ollama"},
     "export": set(),
     "run": set(),          # Computed dynamically from the flags
+    "gui": set(),          # The window checks and reports its own needs
     "devices": {"microphone"},
     "doctor": set(),
     "clear": set(),
@@ -274,6 +275,19 @@ def cmd_export(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_gui(args: argparse.Namespace) -> None:
+    """Opens the desktop window."""
+    try:
+        import gui
+    except ImportError as exc:      # pragma: no cover - depends on the install
+        raise RuntimeError(
+            "No se pudo abrir la ventana porque falta Tkinter.\n"
+            "      Viene incluido en Python de python.org y en Windows.\n"
+            "      En Linux se instala con: sudo apt install python3-tk"
+        ) from exc
+    gui.run()
+
+
 def cmd_clear(args: argparse.Namespace) -> None:
     """Deletes a session's cached intermediate files."""
     pipeline.clear_session(args.name)
@@ -326,6 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser("gui", help="Open the desktop window")
     subparsers.add_parser("devices", help="List available microphones")
     subparsers.add_parser("doctor", help="Check the environment and show resolved settings")
 
@@ -413,6 +428,7 @@ COMMANDS = {
     "export": cmd_export,
     "clear": cmd_clear,
     "run": cmd_run,
+    "gui": cmd_gui,
 }
 
 
